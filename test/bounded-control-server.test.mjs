@@ -21,6 +21,8 @@ async function fixture(logContent, enabled = true) {
   await writeFile(logFile, logContent);
   let yaw = 20;
   let pitch = 10;
+  let x = 0;
+  let held = false;
   let screen = null;
   const seen = [];
   const bridge = createServer(async (req, res) => {
@@ -28,7 +30,7 @@ async function fixture(logContent, enabled = true) {
     if (req.headers.authorization !== `Bearer ${secret}`) { res.writeHead(401).end(); return; }
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/control/status' && req.method === 'GET') {
-      res.end(JSON.stringify({ ok: true, in_world: true, player: { present: true, yaw, pitch }, screen: { present: Boolean(screen), class: screen } }));
+      res.end(JSON.stringify({ ok: true, in_world: true, player: { present: true, x, y: 64, z: 0, yaw, pitch }, screen: { present: Boolean(screen), class: screen }, held_mappings: held ? ['key.forward'] : [] }));
     } else if (req.url === '/control/look' && req.method === 'POST') {
       let body = '';
       for await (const chunk of req) body += chunk;
@@ -36,6 +38,17 @@ async function fixture(logContent, enabled = true) {
       yaw += action.yaw;
       pitch += action.pitch;
       res.end(JSON.stringify({ ok: true, yaw, pitch }));
+    } else if (req.url === '/control/key' && req.method === 'POST') {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      const action = JSON.parse(body);
+      if (action.mapping !== 'key.forward') { res.writeHead(400).end(); return; }
+      if (action.action === 'down') held = true;
+      if (action.action === 'up') { held = false; x += 0.1; }
+      res.end(JSON.stringify({ ok: true, mapping_down: held }));
+    } else if (req.url === '/control/release-all' && req.method === 'POST') {
+      held = false;
+      res.end(JSON.stringify({ ok: true }));
     } else {
       res.writeHead(404).end();
     }
@@ -49,6 +62,7 @@ async function fixture(logContent, enabled = true) {
       MINECRAFT_BRIDGE_TOKEN_FILE: tokenFile,
       MINECRAFT_CLIENT_LOG_FILE: logFile,
       MINECRAFT_ENABLE_SINGLEPLAYER_CONTROL: enabled ? '1' : '0',
+      MINECRAFT_WATCHDOG_DELAY_MS: '500',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -84,7 +98,7 @@ test('bounded look verifies the observed angle and stop blocks later actions', a
   const f = await fixture(INTEGRATED);
   try {
     const tools = await f.call('tools/list', {});
-    assert.deepEqual(tools.result.tools.map((tool) => tool.name), ['minecraft_look', 'minecraft_stop']);
+    assert.deepEqual(tools.result.tools.map((tool) => tool.name), ['minecraft_look', 'minecraft_step_forward', 'minecraft_stop']);
     const looked = await f.call('tools/call', { name: 'minecraft_look', arguments: { yaw_delta: 3, pitch_delta: 0 } });
     assert.equal(looked.result.isError, false);
     assert.equal(JSON.parse(looked.result.content[0].text).observed_yaw_delta, 3);
@@ -95,7 +109,37 @@ test('bounded look verifies the observed angle and stop blocks later actions', a
     assert.equal(stopped.result.isError, false);
     const refused = await f.call('tools/call', { name: 'minecraft_look', arguments: { yaw_delta: 3, pitch_delta: 0 } });
     assert.equal(refused.result.isError, true);
-    assert.equal(f.seen.length, 3);
+    assert.equal(f.seen.some((entry) => entry.path === '/control/key'), false);
+  } finally { await f.close(); }
+});
+
+test('short forward step releases the key and the independent watchdog releases again', async () => {
+  const f = await fixture(INTEGRATED);
+  try {
+    const result = await f.call('tools/call', { name: 'minecraft_step_forward', arguments: { duration_ms: 100 } });
+    assert.equal(result.result.isError, false);
+    assert.ok(JSON.parse(result.result.content[0].text).distance_moved > 0);
+    assert.deepEqual(f.seen.filter((entry) => entry.path === '/control/key').map((entry) => entry.method), ['POST', 'POST']);
+    assert.ok(f.seen.some((entry) => entry.path === '/control/release-all'));
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    assert.ok(f.seen.filter((entry) => entry.path === '/control/release-all').length >= 2);
+    const stopped = await f.call('tools/call', { name: 'minecraft_stop', arguments: {} });
+    assert.equal(stopped.result.isError, false);
+    const refused = await f.call('tools/call', { name: 'minecraft_step_forward', arguments: { duration_ms: 100 } });
+    assert.equal(refused.result.isError, true);
+  } finally { await f.close(); }
+});
+
+test('forward step refuses a pause screen and an excessive duration', async () => {
+  const f = await fixture(INTEGRATED);
+  try {
+    f.setScreen('net.minecraft.client.gui.screens.PauseScreen');
+    const paused = await f.call('tools/call', { name: 'minecraft_step_forward', arguments: { duration_ms: 100 } });
+    assert.equal(paused.result.isError, true);
+    f.setScreen(null);
+    const long = await f.call('tools/call', { name: 'minecraft_step_forward', arguments: { duration_ms: 1000 } });
+    assert.equal(long.result.isError, true);
+    assert.equal(f.seen.some((entry) => entry.path === '/control/key'), false);
   } finally { await f.close(); }
 });
 

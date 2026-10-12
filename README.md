@@ -2,7 +2,7 @@
 
 An experimental, open source integration for letting [Hermes Agent](https://github.com/NousResearch/hermes-agent) observe a Minecraft client, carry out a bounded goal, and check the result. The first target is Minecraft 1.21.1 with NeoForge 21.1.x, using [MineClient Bridge](https://github.com/Campione01/MineClient-Bridge) as the local client interface.
 
-**Status:** the read-only MCP adapter passed its protocol/authentication test and a live observation test in the target modpack. In a disposable single-player world, Hermes Agent using an online NVIDIA Nemotron model called the observation, bounded camera-turn, and stop tools. The turn was 2 degrees and was verified against the game state. Long-running autonomous gameplay and server actions have not been demonstrated.
+**Status:** the read-only MCP adapter passed its protocol/authentication test and a live observation test in the target modpack. In a disposable single-player world, Hermes Agent using an online NVIDIA Nemotron model called the observation, bounded camera-turn, and stop tools. The turn was 2 degrees and was verified against the game state. A separate manual MCP test advanced the player about 0.25 block with a 100 ms forward input and verified release. Long-running autonomous gameplay and server actions have not been demonstrated.
 
 ## Scope
 
@@ -24,11 +24,11 @@ See [research and decisions](docs/research-and-decisions.md), the [first test pl
 
 Set `MINECRAFT_BRIDGE_TOKEN_FILE` to the private token file created by the mod and optionally `MINECRAFT_BRIDGE_URL` to its loopback origin. Keep the token and any Hermes config containing the private path outside Git. Run `node --test test/read-only-server.test.mjs` to check the adapter without launching Minecraft. The live observation test succeeded on 2026-10-12; details are in [research and decisions](docs/research-and-decisions.md).
 
-## Bounded camera adapter
+## Bounded single-player control
 
-`mcp/bounded-control-server.mjs` is a separate MCP server for single-player experiments. It exposes only `minecraft_look` (at most 5 degrees per axis per call) and `minecraft_stop` (disables further actions in that process). It reads the local client log before each turn to require the latest connection marker to be an integrated single-player server, checks the current player and GUI state, and reads the camera angle afterward. It does not expose movement, mouse, chat, commands, or a general input endpoint. The log check is a prototype safeguard; it is not a hard guarantee against a session switch between checks.
+`mcp/bounded-control-server.mjs` is a separate MCP server for single-player experiments. It exposes `minecraft_look` (at most 5 degrees per axis per call), `minecraft_step_forward` (50–200 ms of forward input), and `minecraft_stop` (releases inputs and disables further actions in that process). It reads the local client log before each action to require the latest connection marker to be an integrated single-player server, checks the current player and GUI state, and verifies the result afterward. Movement requires an unpaused world. The forward tool starts a separate release watchdog before pressing the key and releases all synthetic inputs in its own cleanup path. It does not expose mouse clicks, chat, commands, or a general input endpoint. The log check is a prototype safeguard; it is not a hard guarantee against a session switch between checks.
 
-This adapter is disabled unless `MINECRAFT_ENABLE_SINGLEPLAYER_CONTROL=1` is set. It also needs `MINECRAFT_BRIDGE_TOKEN_FILE` and `MINECRAFT_CLIENT_LOG_FILE` pointed at private files outside Git. The tested isolated Hermes profile has the adapter registered with control disabled after the trial. Run `node --test test/bounded-control-server.test.mjs` to check the controls against a fake local bridge. Its first live single-player turn and stop check passed on 2026-10-12.
+This adapter is disabled unless `MINECRAFT_ENABLE_SINGLEPLAYER_CONTROL=1` is set. It also needs `MINECRAFT_BRIDGE_TOKEN_FILE` and `MINECRAFT_CLIENT_LOG_FILE` pointed at private files outside Git. The tested isolated Hermes profile has the adapter registered with control disabled after the trial. Run `node --test test/bounded-control-server.test.mjs` to check the controls against a fake local bridge. The live single-player camera turn and 100 ms forward step passed on 2026-10-12. The model has not been given the forward tool: safe autonomous movement still needs obstacle and hazard perception plus a bounded observe–act–verify loop.
 
 ## License
 

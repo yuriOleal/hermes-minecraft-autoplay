@@ -1,4 +1,8 @@
 import { readFile, lstat } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 
 const MAX_LINE_BYTES = 1024 * 1024;
 const MAX_JSON_BYTES = 1024 * 1024;
@@ -7,6 +11,8 @@ const BRIDGE_ORIGIN = bridgeOrigin(process.env.MINECRAFT_BRIDGE_URL ?? 'http://1
 const TOKEN_FILE = process.env.MINECRAFT_BRIDGE_TOKEN_FILE;
 const CLIENT_LOG_FILE = process.env.MINECRAFT_CLIENT_LOG_FILE;
 const ENABLED = process.env.MINECRAFT_ENABLE_SINGLEPLAYER_CONTROL === '1';
+const WATCHDOG = fileURLToPath(new URL('./release-watchdog.mjs', import.meta.url));
+const WATCHDOG_DELAY_MS = Number(process.env.MINECRAFT_WATCHDOG_DELAY_MS ?? 1200);
 let stopped = false;
 
 const TOOLS = ENABLED ? [
@@ -24,8 +30,18 @@ const TOOLS = ENABLED ? [
     },
   },
   {
+    name: 'minecraft_step_forward',
+    description: 'Hold forward for 50 to 200 ms in an unpaused single-player world; release all synthetic inputs and report distance moved. Use only in a clear, safe area.',
+    inputSchema: {
+      type: 'object',
+      properties: { duration_ms: { type: 'integer', minimum: 50, maximum: 200 } },
+      required: ['duration_ms'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'minecraft_stop',
-    description: 'Permanently disable camera actions for this MCP process.',
+    description: 'Release synthetic inputs and permanently disable actions for this MCP process.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
 ] : [];
@@ -116,6 +132,56 @@ async function look(args) {
   }
 }
 
+function startWatchdog() {
+  if (!Number.isInteger(WATCHDOG_DELAY_MS) || WATCHDOG_DELAY_MS < 500 || WATCHDOG_DELAY_MS > 3000) throw new Error('Invalid watchdog delay');
+  const child = spawn(process.execPath, [WATCHDOG], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+    env: {
+      MINECRAFT_BRIDGE_URL: BRIDGE_ORIGIN,
+      MINECRAFT_BRIDGE_TOKEN_FILE: TOKEN_FILE,
+      MINECRAFT_WATCHDOG_DELAY_MS: String(WATCHDOG_DELAY_MS),
+    },
+  });
+  child.unref();
+  return once(child, 'spawn');
+}
+
+async function stepForward(args) {
+  if (!ENABLED || stopped) throw new Error('Movement control is disabled');
+  if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length !== 1 || !Number.isInteger(args.duration_ms) || args.duration_ms < 50 || args.duration_ms > 200) {
+    throw new Error('duration_ms must be an integer from 50 to 200');
+  }
+  await assertSingleplayer();
+  const before = await request('/control/status');
+  if (!before.in_world || !before.player?.present || before.screen?.present || !['x', 'y', 'z'].every((axis) => Number.isFinite(before.player[axis]))) {
+    throw new Error('Movement requires an unpaused world and a valid player position');
+  }
+  if (before.held_mappings?.includes('key.forward')) throw new Error('Forward key is already held');
+  await assertSingleplayer();
+  await startWatchdog();
+  let actionError;
+  try {
+    await request('/control/key', 'POST', { mapping: 'key.forward', action: 'down' });
+    await delay(args.duration_ms);
+  } catch (error) {
+    actionError = error;
+  } finally {
+    try { await request('/control/key', 'POST', { mapping: 'key.forward', action: 'up' }); } catch (error) { actionError ??= error; }
+    try { await request('/control/release-all', 'POST', {}); } catch (error) { actionError ??= error; }
+  }
+  if (actionError) { stopped = true; throw actionError; }
+  const after = await request('/control/status');
+  if (!after.in_world || !after.player?.present || after.held_mappings?.includes('key.forward')) {
+    stopped = true;
+    throw new Error('Movement verification failed');
+  }
+  const distance = Math.hypot(...['x', 'y', 'z'].map((axis) => after.player[axis] - before.player[axis]));
+  if (!Number.isFinite(distance)) { stopped = true; throw new Error('Movement distance is invalid'); }
+  return { distance_moved: distance, released: true };
+}
+
 function send(message) { process.stdout.write(`${JSON.stringify(message)}\n`); }
 function emptyArgs(args) {
   if (args === undefined || (args && typeof args === 'object' && !Array.isArray(args) && Object.keys(args).length === 0)) return;
@@ -141,9 +207,12 @@ async function handle(line) {
       if (name === 'minecraft_stop' && ENABLED) {
         emptyArgs(message.params?.arguments);
         stopped = true;
+        await request('/control/release-all', 'POST', {});
         result = { content: [{ type: 'text', text: JSON.stringify({ stopped: true }) }], isError: false };
       } else if (name === 'minecraft_look' && ENABLED) {
         result = { content: [{ type: 'text', text: JSON.stringify(await look(message.params?.arguments)) }], isError: false };
+      } else if (name === 'minecraft_step_forward' && ENABLED) {
+        result = { content: [{ type: 'text', text: JSON.stringify(await stepForward(message.params?.arguments)) }], isError: false };
       } else {
         throw new Error('Unknown tool');
       }
