@@ -12,9 +12,9 @@ The target remains the player's own SKLauncher client in All the Mons 1.3.0 (Min
 
 ## Fastest useful route
 
-1. Load the checked Baritone JAR on the next game launch. The file already copied into the instance is `baritone-standalone-neoforge-1.11.3.jar`; its SHA-1 matches the official `checksums.txt`. Verify the client log and a harmless command before treating compatibility as proven.
-2. In the disposable single-player world, test one nearby path and `#stop` through the authenticated client bridge. Confirm that the command stays client-side, movement stops, and the bridge can still read player state. Do not test on the friends' server yet.
-3. Expose a narrow Hermes navigation tool: numeric nearby destination only, limited distance and time, no arbitrary chat/command string; read position, health and screen before and after. Add an independent Baritone stop path, because releasing synthetic keys does not necessarily cancel Baritone's own path.
-4. Give Hermes one small goal at a time and require it to inspect the result before selecting another tool. Crafting, inventory and mod knowledge can follow once navigation is reliable.
+1. The checked Baritone JAR loaded alongside All the Mons after restarting. The client log records Baritone 1.11.3, its Mixin connector, and single-player world cache.
+2. In the disposable single-player world, the authenticated bridge submitted `#help`, `#allowBreak false`, `#allowPlace false`, one adjacent `#goto`, and `#stop`. The first manual path moved about 0.55 block, with full health and an `ok canceled` response.
+3. The narrow `minecraft_navigate_nearby` MCP tool accepts only integer offsets of at most one block on each X/Z axis. It checks single-player and Baritone settings, observes health and GUI state, stops after a fixed short interval, and refuses a second goal in the same process. A live MCP trial moved about 0.84 block. Hermes then interpreted a one-block-south instruction, called this tool, and called stop; the client log and direct state read confirmed the movement and stop.
+4. For unattended use, add an independent Baritone stop path, because releasing synthetic keys does not cancel Baritone's path. Expand task tools and verification before trying collection, crafting or server play.
 
 The client option `pauseOnLostFocus` was changed from `true` to `false` using Minecraft's F3+P shortcut. It was verified with the game out of focus: `window.active=false`, `screen.present=false`. A pause opened manually with Escape remains a stop signal; the agent should not dismiss it automatically.

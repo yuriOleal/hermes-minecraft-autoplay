@@ -10,10 +10,13 @@ const TOKEN_PATTERN = /^[A-Za-z0-9._~-]{32,512}$/;
 const BRIDGE_ORIGIN = bridgeOrigin(process.env.MINECRAFT_BRIDGE_URL ?? 'http://127.0.0.1:38121');
 const TOKEN_FILE = process.env.MINECRAFT_BRIDGE_TOKEN_FILE;
 const CLIENT_LOG_FILE = process.env.MINECRAFT_CLIENT_LOG_FILE;
+const BARITONE_SETTINGS_FILE = process.env.MINECRAFT_BARITONE_SETTINGS_FILE;
 const ENABLED = process.env.MINECRAFT_ENABLE_SINGLEPLAYER_CONTROL === '1';
 const WATCHDOG = fileURLToPath(new URL('./release-watchdog.mjs', import.meta.url));
 const WATCHDOG_DELAY_MS = Number(process.env.MINECRAFT_WATCHDOG_DELAY_MS ?? 1200);
+const NAVIGATION_TIMEOUT_MS = Number(process.env.MINECRAFT_NAVIGATION_TIMEOUT_MS ?? 2000);
 let stopped = false;
+let navigationUsed = false;
 
 const TOOLS = ENABLED ? [
   {
@@ -36,6 +39,19 @@ const TOOLS = ENABLED ? [
       type: 'object',
       properties: { duration_ms: { type: 'integer', minimum: 50, maximum: 200 } },
       required: ['duration_ms'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'minecraft_navigate_nearby',
+    description: 'Ask Baritone to navigate at most one block in X and Z in the active single-player test world, then stop and verify. One navigation call per MCP process.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        dx: { type: 'integer', minimum: -1, maximum: 1 },
+        dz: { type: 'integer', minimum: -1, maximum: 1 },
+      },
+      required: ['dx', 'dz'],
       additionalProperties: false,
     },
   },
@@ -182,6 +198,93 @@ async function stepForward(args) {
   return { distance_moved: distance, released: true };
 }
 
+async function assertBaritoneSettings() {
+  if (!BARITONE_SETTINGS_FILE) throw new Error('Baritone settings file is not configured');
+  const info = await lstat(BARITONE_SETTINGS_FILE);
+  if (!info.isFile() || info.isSymbolicLink() || info.size > 4096) throw new Error('Baritone settings file is invalid');
+  const settings = await readFile(BARITONE_SETTINGS_FILE, 'utf8');
+  for (const name of ['allowBreak', 'allowPlace']) {
+    const entries = settings.split(/\r?\n/).filter((line) => line.trim().startsWith(`${name} `));
+    if (entries.length !== 1 || entries[0].trim() !== `${name} false`) throw new Error(`${name} must be false for navigation`);
+  }
+}
+
+async function waitForScreen(expectedClass) {
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const status = await request('/control/status');
+    if (expectedClass ? status.screen?.class === expectedClass : !status.screen?.present) return status;
+    await delay(100);
+  }
+  throw new Error('Minecraft screen did not reach the expected state');
+}
+
+async function baritoneCommand(command) {
+  await assertSingleplayer();
+  const status = await request('/control/status');
+  if (!status.in_world) throw new Error('Player left the world');
+  if (!status.screen?.present) {
+    await request('/control/key', 'POST', { mapping: 'key.chat', action: 'click' });
+    await waitForScreen('net.minecraft.client.gui.screens.ChatScreen');
+  } else if (status.screen.class !== 'net.minecraft.client.gui.screens.ChatScreen') {
+    throw new Error('Unexpected screen prevents Baritone command');
+  }
+  const sent = await request('/control/text', 'POST', { text: command, submit: true });
+  if (!sent.submitted) throw new Error('Baritone command was not submitted');
+  await waitForScreen(null);
+}
+
+async function navigateNearby(args) {
+  if (!ENABLED || stopped || navigationUsed) throw new Error('Navigation is disabled or already used');
+  if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length !== 2 ||
+      !Number.isInteger(args.dx) || !Number.isInteger(args.dz) ||
+      Math.abs(args.dx) > 1 || Math.abs(args.dz) > 1 || (args.dx === 0 && args.dz === 0)) {
+    throw new Error('dx and dz must be integers from -1 to 1, with at least one nonzero');
+  }
+  if (!Number.isInteger(NAVIGATION_TIMEOUT_MS) || NAVIGATION_TIMEOUT_MS < 200 || NAVIGATION_TIMEOUT_MS > 3000) throw new Error('Invalid navigation timeout');
+  await assertSingleplayer();
+  await assertBaritoneSettings();
+  const before = await request('/control/status');
+  const state = await request('/control/state?radius=0');
+  if (!before.in_world || !before.player?.present || before.screen?.present ||
+      !Number.isFinite(before.player.x) || !Number.isFinite(before.player.z) ||
+      !Number.isFinite(state.player?.health) || state.player.health !== state.player.max_health ||
+      state.player.on_ground !== true || state.nearby?.total !== 0) {
+    throw new Error('Navigation requires a healthy grounded player with no nearby entities or open screen');
+  }
+  await assertSingleplayer();
+  navigationUsed = true;
+  const x = Math.floor(before.player.x) + args.dx;
+  const z = Math.floor(before.player.z) + args.dz;
+  let actionError;
+  try {
+    await baritoneCommand(`#goto ${x} ${z}`);
+    await delay(NAVIGATION_TIMEOUT_MS);
+  } catch (error) {
+    actionError = error;
+  } finally {
+    // TODO(security): add an independent Baritone stop watchdog before unattended navigation.
+    try { await baritoneCommand('#stop'); } catch (error) { actionError ??= error; }
+    try { await request('/control/release-all', 'POST', {}); } catch (error) { actionError ??= error; }
+  }
+  if (actionError) { stopped = true; throw actionError; }
+  await assertSingleplayer();
+  const after = await request('/control/status');
+  const afterState = await request('/control/state?radius=0');
+  if (!after.in_world || !after.player?.present || after.screen?.present ||
+      !Number.isFinite(after.player.x) || !Number.isFinite(after.player.z) ||
+      (after.held_mappings?.length ?? 0) !== 0 ||
+      !Number.isFinite(afterState.player?.health) || afterState.player.health < state.player.health) {
+    stopped = true;
+    throw new Error('Navigation result is unsafe or incomplete');
+  }
+  return {
+    distance_moved: Math.hypot(after.player.x - before.player.x, after.player.z - before.player.z),
+    health: afterState.player.health,
+    target: { x, z },
+    stopped: true,
+  };
+}
+
 function send(message) { process.stdout.write(`${JSON.stringify(message)}\n`); }
 function emptyArgs(args) {
   if (args === undefined || (args && typeof args === 'object' && !Array.isArray(args) && Object.keys(args).length === 0)) return;
@@ -213,6 +316,8 @@ async function handle(line) {
         result = { content: [{ type: 'text', text: JSON.stringify(await look(message.params?.arguments)) }], isError: false };
       } else if (name === 'minecraft_step_forward' && ENABLED) {
         result = { content: [{ type: 'text', text: JSON.stringify(await stepForward(message.params?.arguments)) }], isError: false };
+      } else if (name === 'minecraft_navigate_nearby' && ENABLED) {
+        result = { content: [{ type: 'text', text: JSON.stringify(await navigateNearby(message.params?.arguments)) }], isError: false };
       } else {
         throw new Error('Unknown tool');
       }

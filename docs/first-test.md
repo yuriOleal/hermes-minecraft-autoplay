@@ -9,6 +9,8 @@
 5. Confirm an explicit stop prevents further actions and releases any held synthetic input. The bounded adapter passed this check on 2026-10-12. A 100 ms forward input moved the player about 0.25 block in the disposable single-player world; the input was released, with an independent delayed release watchdog as backup.
 6. Compare game FPS and frame time with bridge idle and during inference. Record `ollama ps` and system RAM/VRAM pressure for any local-model trial.
 
+On 2026-10-12, Baritone 1.11.3 loaded with the target modpack. A manual bridge call and then a Hermes-selected `minecraft_navigate_nearby` call each navigated to an adjacent block and sent `#stop`. The Hermes trial moved about 0.84 block, with full health, no open GUI and no held bridge inputs afterward. This demonstrates one attended natural-language navigation goal, not sustained autonomous play.
+
 ## Verification and security
 
 - Run MCP self-tests from the pinned source and verify the JAR hash before installation.

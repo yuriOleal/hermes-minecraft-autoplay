@@ -16,21 +16,27 @@ async function fixture(logContent, enabled = true) {
   const dir = await mkdtemp(join(tmpdir(), 'minecraft-control-test-'));
   const tokenFile = join(dir, 'bridge.token');
   const logFile = join(dir, 'latest.log');
+  const settingsFile = join(dir, 'baritone-settings.txt');
   const secret = 'test-token-that-is-at-least-thirty-two-characters';
   await writeFile(tokenFile, secret);
   await writeFile(logFile, logContent);
+  await writeFile(settingsFile, 'allowBreak false\nallowPlace false\n');
   let yaw = 20;
   let pitch = 10;
   let x = 0;
+  let z = 0;
   let held = false;
   let screen = null;
   const seen = [];
+  const commands = [];
   const bridge = createServer(async (req, res) => {
     seen.push({ path: req.url, method: req.method, auth: req.headers.authorization });
     if (req.headers.authorization !== `Bearer ${secret}`) { res.writeHead(401).end(); return; }
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/control/status' && req.method === 'GET') {
-      res.end(JSON.stringify({ ok: true, in_world: true, player: { present: true, x, y: 64, z: 0, yaw, pitch }, screen: { present: Boolean(screen), class: screen }, held_mappings: held ? ['key.forward'] : [] }));
+      res.end(JSON.stringify({ ok: true, in_world: true, player: { present: true, x, y: 64, z, yaw, pitch }, screen: { present: Boolean(screen), class: screen }, held_mappings: held ? ['key.forward'] : [] }));
+    } else if (req.url === '/control/state?radius=0' && req.method === 'GET') {
+      res.end(JSON.stringify({ ok: true, player: { health: 20, max_health: 20, on_ground: true }, nearby: { total: 0 } }));
     } else if (req.url === '/control/look' && req.method === 'POST') {
       let body = '';
       for await (const chunk of req) body += chunk;
@@ -42,6 +48,11 @@ async function fixture(logContent, enabled = true) {
       let body = '';
       for await (const chunk of req) body += chunk;
       const action = JSON.parse(body);
+      if (action.mapping === 'key.chat' && action.action === 'click') {
+        screen = 'net.minecraft.client.gui.screens.ChatScreen';
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
       if (action.mapping !== 'key.forward') { res.writeHead(400).end(); return; }
       if (action.action === 'down') held = true;
       if (action.action === 'up') { held = false; x += 0.1; }
@@ -49,6 +60,14 @@ async function fixture(logContent, enabled = true) {
     } else if (req.url === '/control/release-all' && req.method === 'POST') {
       held = false;
       res.end(JSON.stringify({ ok: true }));
+    } else if (req.url === '/control/text' && req.method === 'POST') {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      const action = JSON.parse(body);
+      commands.push(action.text);
+      if (action.text.startsWith('#goto ')) z = -0.5;
+      screen = null;
+      res.end(JSON.stringify({ ok: true, submitted: true, closed: true }));
     } else {
       res.writeHead(404).end();
     }
@@ -61,6 +80,8 @@ async function fixture(logContent, enabled = true) {
       MINECRAFT_BRIDGE_URL: `http://127.0.0.1:${bridge.address().port}`,
       MINECRAFT_BRIDGE_TOKEN_FILE: tokenFile,
       MINECRAFT_CLIENT_LOG_FILE: logFile,
+      MINECRAFT_BARITONE_SETTINGS_FILE: settingsFile,
+      MINECRAFT_NAVIGATION_TIMEOUT_MS: '250',
       MINECRAFT_ENABLE_SINGLEPLAYER_CONTROL: enabled ? '1' : '0',
       MINECRAFT_WATCHDOG_DELAY_MS: '500',
     },
@@ -89,6 +110,7 @@ async function fixture(logContent, enabled = true) {
   return {
     call,
     seen,
+    commands,
     setScreen(value) { screen = value; },
     async close() { child.kill(); bridge.close(); await rm(dir, { recursive: true, force: true }); },
   };
@@ -98,7 +120,7 @@ test('bounded look verifies the observed angle and stop blocks later actions', a
   const f = await fixture(INTEGRATED);
   try {
     const tools = await f.call('tools/list', {});
-    assert.deepEqual(tools.result.tools.map((tool) => tool.name), ['minecraft_look', 'minecraft_step_forward', 'minecraft_stop']);
+    assert.deepEqual(tools.result.tools.map((tool) => tool.name), ['minecraft_look', 'minecraft_step_forward', 'minecraft_navigate_nearby', 'minecraft_stop']);
     const looked = await f.call('tools/call', { name: 'minecraft_look', arguments: { yaw_delta: 3, pitch_delta: 0 } });
     assert.equal(looked.result.isError, false);
     assert.equal(JSON.parse(looked.result.content[0].text).observed_yaw_delta, 3);
@@ -141,6 +163,36 @@ test('forward step refuses a pause screen and an excessive duration', async () =
     assert.equal(long.result.isError, true);
     assert.equal(f.seen.some((entry) => entry.path === '/control/key'), false);
   } finally { await f.close(); }
+});
+
+test('one nearby Baritone goal is stopped and checked before another can start', async () => {
+  const f = await fixture(INTEGRATED);
+  try {
+    const result = await f.call('tools/call', { name: 'minecraft_navigate_nearby', arguments: { dx: 0, dz: -1 } });
+    assert.equal(result.result.isError, false);
+    const observation = JSON.parse(result.result.content[0].text);
+    assert.ok(observation.distance_moved > 0);
+    assert.equal(observation.health, 20);
+    assert.deepEqual(f.commands, ['#goto 0 -1', '#stop']);
+    const again = await f.call('tools/call', { name: 'minecraft_navigate_nearby', arguments: { dx: 1, dz: 0 } });
+    assert.equal(again.result.isError, true);
+  } finally { await f.close(); }
+});
+
+test('nearby Baritone goal refuses a pause screen and a remote session', async () => {
+  const paused = await fixture(INTEGRATED);
+  try {
+    paused.setScreen('net.minecraft.client.gui.screens.PauseScreen');
+    const result = await paused.call('tools/call', { name: 'minecraft_navigate_nearby', arguments: { dx: 0, dz: -1 } });
+    assert.equal(result.result.isError, true);
+    assert.deepEqual(paused.commands, []);
+  } finally { await paused.close(); }
+  const remote = await fixture(INTEGRATED + REMOTE);
+  try {
+    const result = await remote.call('tools/call', { name: 'minecraft_navigate_nearby', arguments: { dx: 0, dz: -1 } });
+    assert.equal(result.result.isError, true);
+    assert.deepEqual(remote.commands, []);
+  } finally { await remote.close(); }
 });
 
 test('rejects remote session, oversized turn, unexpected GUI, and unknown tool without sending input', async () => {
