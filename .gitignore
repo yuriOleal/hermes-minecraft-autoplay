@@ -1,0 +1,12 @@
+# Local Minecraft state and credentials must never enter the public repository.
+local/
+*.token
+*.log
+*.jar
+*.zip
+.env
+.env.*
+config.yaml
+*.session.json
+node_modules/
+__pycache__/
