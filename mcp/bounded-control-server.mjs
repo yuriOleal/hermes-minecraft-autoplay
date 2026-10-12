@@ -1,0 +1,180 @@
+import { readFile, lstat } from 'node:fs/promises';
+
+const MAX_LINE_BYTES = 1024 * 1024;
+const MAX_JSON_BYTES = 1024 * 1024;
+const TOKEN_PATTERN = /^[A-Za-z0-9._~-]{32,512}$/;
+const BRIDGE_ORIGIN = bridgeOrigin(process.env.MINECRAFT_BRIDGE_URL ?? 'http://127.0.0.1:38121');
+const TOKEN_FILE = process.env.MINECRAFT_BRIDGE_TOKEN_FILE;
+const CLIENT_LOG_FILE = process.env.MINECRAFT_CLIENT_LOG_FILE;
+const ENABLED = process.env.MINECRAFT_ENABLE_SINGLEPLAYER_CONTROL === '1';
+let stopped = false;
+
+const TOOLS = ENABLED ? [
+  {
+    name: 'minecraft_look',
+    description: 'Turn the camera up to 5 degrees on each axis in the active single-player world; verify the result. No movement, clicks, chat or commands.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        yaw_delta: { type: 'number', minimum: -5, maximum: 5 },
+        pitch_delta: { type: 'number', minimum: -5, maximum: 5 },
+      },
+      required: ['yaw_delta', 'pitch_delta'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'minecraft_stop',
+    description: 'Permanently disable camera actions for this MCP process.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+] : [];
+
+function bridgeOrigin(value) {
+  const url = new URL(value);
+  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port || url.pathname !== '/' || url.search || url.hash || url.username || url.password) {
+    throw new Error('MINECRAFT_BRIDGE_URL must be a numeric 127.0.0.1 HTTP origin with a port');
+  }
+  return url.origin;
+}
+
+async function token() {
+  if (!TOKEN_FILE) throw new Error('MINECRAFT_BRIDGE_TOKEN_FILE is not configured');
+  const info = await lstat(TOKEN_FILE);
+  if (!info.isFile() || info.isSymbolicLink() || info.size > 4096) throw new Error('Bridge token file is invalid');
+  const value = (await readFile(TOKEN_FILE, 'utf8')).trim();
+  if (!TOKEN_PATTERN.test(value)) throw new Error('Bridge token file is invalid');
+  return value;
+}
+
+async function request(path, method = 'GET', body) {
+  const response = await fetch(`${BRIDGE_ORIGIN}${path}`, {
+    method,
+    headers: { Authorization: `Bearer ${await token()}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!response.ok) throw new Error(`Minecraft bridge returned HTTP ${response.status}`);
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_JSON_BYTES) throw new Error('Minecraft bridge response is too large');
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length > MAX_JSON_BYTES) throw new Error('Minecraft bridge response is too large');
+  return JSON.parse(bytes.toString('utf8'));
+}
+
+async function assertSingleplayer() {
+  if (!CLIENT_LOG_FILE) throw new Error('MINECRAFT_CLIENT_LOG_FILE is not configured');
+  const info = await lstat(CLIENT_LOG_FILE);
+  if (!info.isFile() || info.isSymbolicLink() || info.size > 64 * 1024 * 1024) throw new Error('Minecraft client log is invalid');
+  const log = await readFile(CLIENT_LOG_FILE, 'utf8');
+  const events = [...log.matchAll(/^.*(?:\[net\.minecraft\.client\.server\.IntegratedServer\/\]: Starting integrated minecraft server|\[net\.minecraft\.client\.gui\.screens\.ConnectScreen\/\]: Connecting to|\[net\.minecraft\.server\.MinecraftServer\/\]: Stopping server).*$/gm)];
+  if (!events.length || !events.at(-1)[0].includes('Starting integrated minecraft server')) {
+    throw new Error('Current client session is not confirmed single-player');
+  }
+}
+
+function checkedArgs(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length !== 2 || !Object.hasOwn(args, 'yaw_delta') || !Object.hasOwn(args, 'pitch_delta')) {
+    throw new Error('Expected yaw_delta and pitch_delta only');
+  }
+  for (const value of [args.yaw_delta, args.pitch_delta]) {
+    if (typeof value !== 'number' || !Number.isFinite(value) || Math.abs(value) > 5) throw new Error('Each camera delta must be within 5 degrees');
+  }
+  if (args.yaw_delta === 0 && args.pitch_delta === 0) throw new Error('At least one camera delta must be nonzero');
+  return args;
+}
+
+function angleDelta(after, before) {
+  let delta = after - before;
+  while (delta > 180) delta -= 360;
+  while (delta < -180) delta += 360;
+  return delta;
+}
+
+async function look(args) {
+  if (!ENABLED || stopped) throw new Error('Camera control is disabled');
+  const { yaw_delta, pitch_delta } = checkedArgs(args);
+  await assertSingleplayer();
+  const before = await request('/control/status');
+  if (!before.in_world || !before.player?.present || !Number.isFinite(before.player.yaw) || !Number.isFinite(before.player.pitch)) throw new Error('Player is not in a world');
+  if (before.screen?.present && before.screen.class !== 'net.minecraft.client.gui.screens.PauseScreen') throw new Error('Unexpected screen is open');
+  if (before.player.pitch + pitch_delta < -90 || before.player.pitch + pitch_delta > 90) throw new Error('Camera pitch would be clamped');
+  await assertSingleplayer();
+  try {
+    const action = await request('/control/look', 'POST', { yaw: yaw_delta, pitch: pitch_delta, relative: true });
+    if (!action.ok) throw new Error('Camera action failed');
+    const after = await request('/control/status');
+    const observedYaw = angleDelta(after.player?.yaw, before.player.yaw);
+    const observedPitch = after.player?.pitch - before.player.pitch;
+    if (!after.in_world || !Number.isFinite(observedYaw) || !Number.isFinite(observedPitch) || Math.abs(observedYaw - yaw_delta) > 0.25 || Math.abs(observedPitch - pitch_delta) > 0.25) {
+      throw new Error('Camera result did not match the requested turn');
+    }
+    return { observed_yaw_delta: observedYaw, observed_pitch_delta: observedPitch };
+  } catch (error) {
+    stopped = true;
+    throw error;
+  }
+}
+
+function send(message) { process.stdout.write(`${JSON.stringify(message)}\n`); }
+function emptyArgs(args) {
+  if (args === undefined || (args && typeof args === 'object' && !Array.isArray(args) && Object.keys(args).length === 0)) return;
+  throw new Error('This tool takes no arguments');
+}
+
+async function handle(line) {
+  let message;
+  try { message = JSON.parse(line); } catch { send({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Invalid JSON' } }); return; }
+  if (!message || typeof message !== 'object' || Array.isArray(message) || message.jsonrpc !== '2.0') {
+    send({ jsonrpc: '2.0', id: message?.id ?? null, error: { code: -32600, message: 'Invalid request' } });
+    return;
+  }
+  if (message.id === undefined) return;
+  try {
+    let result;
+    if (message.method === 'initialize') {
+      result = { protocolVersion: message.params?.protocolVersion ?? '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'hermes-minecraft-bounded-control', version: '0.1.0' } };
+    } else if (message.method === 'tools/list') {
+      result = { tools: TOOLS };
+    } else if (message.method === 'tools/call') {
+      const name = message.params?.name;
+      if (name === 'minecraft_stop' && ENABLED) {
+        emptyArgs(message.params?.arguments);
+        stopped = true;
+        result = { content: [{ type: 'text', text: JSON.stringify({ stopped: true }) }], isError: false };
+      } else if (name === 'minecraft_look' && ENABLED) {
+        result = { content: [{ type: 'text', text: JSON.stringify(await look(message.params?.arguments)) }], isError: false };
+      } else {
+        throw new Error('Unknown tool');
+      }
+    } else {
+      send({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } });
+      return;
+    }
+    send({ jsonrpc: '2.0', id: message.id, result });
+  } catch (error) {
+    send({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: String(error.message || 'Bridge error') }], isError: true } });
+  }
+}
+
+let pending = Buffer.alloc(0);
+let queue = Promise.resolve();
+process.stdin.on('data', (chunk) => {
+  pending = Buffer.concat([pending, chunk]);
+  for (;;) {
+    const newline = pending.indexOf(10);
+    if (newline < 0) break;
+    const line = pending.subarray(0, newline);
+    pending = pending.subarray(newline + 1);
+    if (line.length > MAX_LINE_BYTES) {
+      send({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Line too large' } });
+      continue;
+    }
+    if (line.length) queue = queue.then(() => handle(line.toString('utf8')));
+  }
+  if (pending.length > MAX_LINE_BYTES) {
+    send({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Line too large' } });
+    process.exitCode = 1;
+    process.stdin.pause();
+  }
+});
