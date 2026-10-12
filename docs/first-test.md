@@ -4,7 +4,7 @@
 
 1. Preserve the original instance state and record the bridge JAR hash.
 2. Install the pinned client-only bridge; launch the existing client and confirm it reaches the title screen without a mod loading error.
-3. Register the running client with the MCP adapter using a private token path. Query bridge status, player state and a framebuffer. Do not send input.
+3. Let the mod create its private token file. Point the read-only MCP adapter at that path without copying the token into the repository. Query bridge status, player state and a framebuffer. Do not send input.
 4. In an expendable single-player world, ask the agent to turn the camera a small fixed amount, then query state again. Verify the observed yaw changed as requested.
 5. Interrupt a held-input test and confirm `release_all` leaves no key held. Confirm an explicit stop prevents further actions.
 6. Compare game FPS and frame time with bridge idle and during inference. Record `ollama ps` and system RAM/VRAM pressure for any local-model trial.

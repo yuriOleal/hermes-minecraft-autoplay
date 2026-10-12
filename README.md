@@ -2,7 +2,7 @@
 
 An experimental, open source integration for letting [Hermes Agent](https://github.com/NousResearch/hermes-agent) observe a Minecraft client, carry out a bounded goal, and check the result. The first target is Minecraft 1.21.1 with NeoForge 21.1.x, using [MineClient Bridge](https://github.com/Campione01/MineClient-Bridge) as the local client interface.
 
-**Status:** research and integration design. No autonomous gameplay has been demonstrated yet. The first acceptance test will be read-only in a local world. Server gameplay and long-running autonomy are later milestones.
+**Status:** a read-only MCP adapter is implemented and its protocol/authentication test passes. The mod has not yet been launched in the target modpack, so no live observation or autonomous gameplay has been demonstrated. Server gameplay and long-running autonomy are later milestones.
 
 ## Scope
 
@@ -16,7 +16,13 @@ The client bridge does not create a second player or keep playing after the clie
 
 ## Current dependencies and evidence
 
-See [research and decisions](docs/research-and-decisions.md) and the [first test plan](docs/first-test.md). Dependencies are linked rather than vendored. A public release will pin versions and document reproducible installation after the integration works.
+See [research and decisions](docs/research-and-decisions.md) and the [first test plan](docs/first-test.md). Dependencies are linked rather than vendored. A tagged release will pin versions and document reproducible installation after the integration works.
+
+## Read-only adapter
+
+`mcp/read-only-server.mjs` is a dependency-free Node.js 20+ MCP server. It connects to MineClient Bridge on numeric loopback and offers four observation tools: `minecraft_status`, `minecraft_state`, `minecraft_screen`, and `minecraft_frame`. It has no input, chat, command, filesystem, or process-control tool.
+
+Set `MINECRAFT_BRIDGE_TOKEN_FILE` to the private token file created by the mod and optionally `MINECRAFT_BRIDGE_URL` to its loopback origin. Keep the token and any Hermes config containing the private path outside Git. Run `node --test test/read-only-server.test.mjs` to check the adapter without launching Minecraft. The first live test requires a running client with the bridge mod installed.
 
 ## License
 

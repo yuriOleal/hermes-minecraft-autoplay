@@ -24,11 +24,13 @@ The user wants an AI that plays as their existing character in a modded Minecraf
 
 Keep provider configuration outside this repository. Prototype the bridge and control loop without selecting a paid provider. Use Qwen3.5 4B as the first local candidate: a short tool call at 65,536 context completed in 8.6 seconds from a cold load on the target Windows machine. This is a feasibility check, not a gameplay benchmark or quality evaluation. Measure it with Minecraft and shaders running before choosing it as the default. If it competes with the game's RAM/VRAM or yields unreliable tool calls, use a remote inference provider or another computer. Using the existing Qwen3 8B despite its 40K native window would conceal a core compatibility problem. No paid provider or fallback is configured automatically.
 
+An isolated Hermes profile was pointed at Ollama without changing the user's normal profile. On Ollama 0.33.1, `options.num_ctx` sent through the OpenAI-compatible route did not change the loaded context from 4,096. A local Modelfile variant with `PARAMETER num_ctx 65536` did load at 65,536, consuming 5.2 GB GPU memory, but a basic Hermes prompt stalled while system RAM fell below 2 GB with Minecraft closed. The test was interrupted and the model unloaded. Local inference remains available for experiments; it is not yet a suitable always-on gameplay default on this computer. The user prefers retaining a local option and making a remote provider selectable later.
+
 [Hermes provider documentation](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/integrations/providers.md) currently states a 64K minimum and explains Ollama configuration. [Ollama context documentation](https://docs.ollama.com/context-length) says larger contexts use more memory and `ollama ps` shows GPU/CPU placement.
 
 ## Version and supply-chain decisions
 
-- Pin the bridge release to 1.1.5 for initial testing. Its published JAR SHA-256 is `DC1C420A0C1CCE18026984AB49C58F4E7034409F5430FA2ED623AC16B48CFACE`, matching the downloaded artifact. The MCP adapter at the same tag passed its Node self-tests on Windows. Source review found loopback binding and bearer-token checks. This does not prove compatibility with the modpack.
+- Pin the bridge release to 1.1.5 for initial testing. Its published JAR SHA-256 is `DC1C420A0C1CCE18026984AB49C58F4E7034409F5430FA2ED623AC16B48CFACE`, matching the downloaded artifact. The upstream MCP adapter at the same tag passed its Node self-tests on Windows. Its registration contract needs prepared run identity fields, so it is not suitable for a normal SKLauncher foreground instance without special launch metadata. This repository's small read-only MCP adapter calls the authenticated loopback API directly. Source review found loopback binding and bearer-token checks. This does not prove compatibility with the modpack.
 - The local Ollama installation is 0.33.1. The latest GitHub release checked on 2026-10-12 is [0.40.3](https://github.com/ollama/ollama/releases/tag/v0.40.3). Update only after preserving the model store and testing the new version; the 0.40 line migrated model manifests and had a [Windows regression](https://github.com/ollama/ollama/issues/18847) later marked fixed. The existing version is functional for listing models.
 - Hermes installed locally is 0.21.2; the latest release checked is [0.21.7](https://github.com/NousResearch/hermes-agent/releases/tag/v0.21.7). Do not update both runtimes at once. Back up configuration and record versions before a staged update.
 
@@ -36,6 +38,7 @@ Keep provider configuration outside this repository. Prototype the bridge and co
 
 - Only bind the bridge to loopback and keep its token in a private, user-owned file.
 - Keep `command` and unrestricted text submission unavailable to the autonomous loop by default, especially on a server where the account may have elevated permissions.
+- The first MCP adapter exposes only status, state, screen, and frame. Input tools will be designed separately after live read-only verification.
 - Start with read-only observation, then a timed key tap in single-player. Release all held inputs on interruption, timeout, error, or shutdown.
 - Limit action duration, iteration count, and area. Pause on death, disconnect, unexpected GUI, low health, or ambiguous state.
 - Treat web pages, in-game chat, signs, mod descriptions, and tool output as data. They must not override the user's goal or the action limits.
