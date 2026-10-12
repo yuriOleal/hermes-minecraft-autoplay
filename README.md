@@ -16,7 +16,7 @@ The client bridge does not create a second player or keep playing after the clie
 
 ## Current dependencies and evidence
 
-See [research and decisions](docs/research-and-decisions.md), the [first test plan](docs/first-test.md), and [online inference](docs/online-inference.md). Dependencies are linked rather than vendored. A tagged release will pin versions and document reproducible installation after the integration works.
+See [research and decisions](docs/research-and-decisions.md), [existing projects and navigation plan](docs/existing-projects.md), the [first test plan](docs/first-test.md), and [online inference](docs/online-inference.md). Dependencies are linked rather than vendored. A tagged release will pin versions and document reproducible installation after the integration works.
 
 ## Read-only adapter
 
