@@ -1,0 +1,15 @@
+# Online inference prototype — 2026-10-12
+
+The target PC has 16 GB of RAM. With All the Mons and shaders running, Windows reported roughly 0.6 GB free RAM while Ollama had no model loaded. The local Qwen3.5 4B candidate uses about 5.2 GB of GPU memory at a 65,536-token context when the game is closed. Loading it alongside the game was deferred; the snapshot does not establish an FPS benchmark.
+
+For the first remote trial, Hermes Agent used NVIDIA's hosted `nvidia/nemotron-3-super-120b-a12b` model. NVIDIA describes Nemotron 3 Super as an open-weight model with tool use and up to 1M tokens of context. NVIDIA's hosted endpoint is available free for prototyping through the Developer Program, subject to its service limits; this is not a promise of free continuous operation. Hermes supports `nvidia` as a provider and the OpenAI-compatible API. Sources: [model card](https://build.nvidia.com/nvidia/nemotron-3-super-120b-a12b/modelcard), [NVIDIA API access terms](https://docs.api.nvidia.com/nim/docs/product), [Hermes providers](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/integrations/providers.md).
+
+The Minecraft project uses an isolated `HERMES_HOME` outside Git. Its model setting can be switched between NVIDIA and the previously tested local Ollama model without changing the client bridge or MCP tool code. The existing NVIDIA credential was passed to the isolated Hermes process temporarily from the user's normal Hermes environment file; no key was copied into the repository or stored in the isolated profile. The online profile selects only `minecraft_status` and `minecraft_state`. These tool results now omit account names, UUIDs and local runtime identifiers. `minecraft_screen` and `minecraft_frame` remain available for local experiments, but were not selected for the online trial because they can contain private UI or chat content.
+
+## Verified sequence
+
+1. A non-game prompt returned `OK` through NVIDIA from both the normal and isolated Hermes profiles.
+2. With Minecraft in a disposable single-player world, Hermes called `minecraft_status` and correctly reported `in_world=true` and `minecraft:overworld`. The stored session contained the tool call and no player name.
+3. With the bounded camera MCP temporarily enabled, Hermes called `minecraft_status`, `minecraft_look` with yaw `+2` and pitch `0`, and `minecraft_stop`. The tool reported an observed 2-degree yaw change; a direct bridge read confirmed the new yaw. Ollama had no model loaded afterward, and Windows still showed roughly 0.6 GB free RAM. The control flag was reset to disabled after the trial.
+
+This proves one agent-selected tool sequence, not independent gameplay. The model followed an explicit instruction for the turn. Next work is a short observe-decide-act-verify loop for a harmless goal, then controlled movement and an emergency release mechanism in single-player. Before any server action, determine the server's automation rules and improve the session boundary beyond the current client-log marker.

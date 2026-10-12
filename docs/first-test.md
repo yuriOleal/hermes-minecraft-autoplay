@@ -5,7 +5,7 @@
 1. Preserve the original instance state and record the bridge JAR hash.
 2. Install the pinned client-only bridge; launch the existing client and confirm it reaches an active world without a mod loading error.
 3. Let the mod create its private token file. Point the read-only MCP adapter at that path without copying the token into the repository. Query bridge status, player state and a framebuffer. Do not send input. This observation passed on 2026-10-12 while the player was on the server.
-4. In an expendable single-player world, turn the camera a small fixed amount, then query state again. Verify the observed yaw changed as requested. A manual 3-degree turn and a bounded MCP 2-degree turn passed on 2026-10-12. The agent has not yet chosen an action itself.
+4. In an expendable single-player world, turn the camera a small fixed amount, then query state again. Verify the observed yaw changed as requested. A manual 3-degree turn, a bounded MCP 2-degree turn and a Hermes-controlled online 2-degree turn passed on 2026-10-12. The agent followed an explicit target angle; independent goal selection remains untested.
 5. Confirm an explicit stop prevents further actions. The bounded camera adapter passed this check on 2026-10-12. A held-input test and `release_all` are deferred until a separate movement adapter exists.
 6. Compare game FPS and frame time with bridge idle and during inference. Record `ollama ps` and system RAM/VRAM pressure for any local-model trial.
 

@@ -20,7 +20,16 @@ test('read-only MCP exposes bounded authenticated observations', async () => {
     seen.push({ path: req.url, method: req.method, auth: req.headers.authorization });
     if (req.headers.authorization !== `Bearer ${secret}`) { res.writeHead(401).end(); return; }
     res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({ ok: true, path: req.url }));
+    res.end(JSON.stringify({
+      ok: true,
+      process_id: 123,
+      run_id: 'private-run',
+      in_world: true,
+      player: { present: true, name: 'private-user', uuid: 'private-uuid', x: 1, y: 2, z: 3, yaw: 4, pitch: 5, health: 20, inventory: [{ id: 'minecraft:stone', count: 4 }] },
+      crosshair: { type: 'entity', uuid: 'private-target-uuid', name: 'private-target', entity_type: 'minecraft:zombie' },
+      world: { dimension: 'minecraft:overworld', game_time: 12 },
+      nearby: { radius: 3, entities: [{ uuid: 'private-nearby-uuid', name: 'private-nearby', type: 'minecraft:zombie', distance: 2 }] },
+    }));
   });
   bridge.listen(0, '127.0.0.1');
   await once(bridge, 'listening');
@@ -59,13 +68,20 @@ test('read-only MCP exposes bounded authenticated observations', async () => {
     const listed = await call('tools/list', {});
     assert.deepEqual(listed.result.tools.map((tool) => tool.name), ['minecraft_status', 'minecraft_state', 'minecraft_screen', 'minecraft_frame']);
     const state = await call('tools/call', { name: 'minecraft_state', arguments: { radius: 3 } });
-    assert.equal(JSON.parse(state.result.content[0].text).path, '/control/state?radius=3');
-    assert.deepEqual(seen, [{ path: '/control/state?radius=3', method: 'GET', auth: `Bearer ${secret}` }]);
+    const observed = JSON.parse(state.result.content[0].text);
+    assert.equal(observed.player.health, 20);
+    assert.equal(observed.player.inventory[0].id, 'minecraft:stone');
+    assert.equal(observed.nearby.entities[0].type, 'minecraft:zombie');
+    assert.equal(state.result.content[0].text.includes('private-'), false);
+    const status = await call('tools/call', { name: 'minecraft_status', arguments: {} });
+    assert.equal(JSON.parse(status.result.content[0].text).in_world, true);
+    assert.equal(status.result.content[0].text.includes('private-'), false);
+    assert.deepEqual(seen.map((entry) => entry.path), ['/control/state?radius=3', '/control/status']);
     const invalid = await call('tools/call', { name: 'minecraft_state', arguments: { radius: 999 } });
     assert.equal(invalid.result.isError, true);
     const command = await call('tools/call', { name: 'minecraft_command', arguments: { command: 'op user' } });
     assert.equal(command.result.isError, true);
-    assert.equal(seen.length, 1);
+    assert.equal(seen.length, 2);
     assert.equal(JSON.stringify([init, listed, state, invalid, command]).includes(secret), false);
     await writeFile(tokenFile, 'wrong-token-that-is-at-least-thirty-two-characters');
     const unauthorized = await call('tools/call', { name: 'minecraft_status', arguments: {} });

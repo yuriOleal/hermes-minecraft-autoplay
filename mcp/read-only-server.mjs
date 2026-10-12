@@ -71,9 +71,57 @@ async function request(path, maxBytes) {
   return bytes;
 }
 
-async function jsonTool(path) {
+function pick(source, keys) {
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return {};
+  return Object.fromEntries(keys.filter((key) => Object.hasOwn(source, key)).map((key) => [key, source[key]]));
+}
+
+function items(source) {
+  return Array.isArray(source) ? source.map((item) => pick(item, ['empty', 'id', 'count', 'damage', 'max_damage', 'slot'])) : [];
+}
+
+function publicStatus(data) {
+  return {
+    ...pick(data, ['ok', 'bridge_running', 'in_world']),
+    world: pick(data.world, ['present', 'dimension', 'game_time']),
+    player: pick(data.player, ['present', 'x', 'y', 'z', 'yaw', 'pitch']),
+    screen: pick(data.screen, ['present', 'class']),
+  };
+}
+
+function publicState(data) {
+  const player = pick(data.player, [
+    'x', 'y', 'z', 'yaw', 'pitch', 'health', 'max_health',
+    'food', 'saturation', 'air', 'max_air', 'xp_level', 'xp_progress',
+    'xp_total', 'gamemode', 'dimension', 'on_ground', 'selected_slot',
+    'inventory_total', 'inventory_truncated', 'effects_total',
+    'effects_returned', 'effects_truncated',
+  ]);
+  player.velocity = pick(data.player?.velocity, ['x', 'y', 'z']);
+  player.inventory = items(data.player?.inventory);
+  player.armor = items(data.player?.armor);
+  player.offhand = pick(data.player?.offhand, ['empty', 'id', 'count', 'damage', 'max_damage']);
+  player.effects = Array.isArray(data.player?.effects)
+    ? data.player.effects.map((effect) => pick(effect, ['id', 'amplifier', 'duration_ticks', 'ambient', 'visible']))
+    : [];
+  const nearby = pick(data.nearby, ['radius', 'total', 'returned', 'truncated']);
+  nearby.entities = Array.isArray(data.nearby?.entities)
+    ? data.nearby.entities.map((entity) => pick(entity, ['type', 'x', 'y', 'z', 'yaw', 'pitch', 'distance', 'alive', 'on_ground', 'health', 'max_health']))
+    : [];
+  const crosshair = pick(data.crosshair, ['type', 'distance', 'id', 'x', 'y', 'z', 'face', 'entity_type']);
+  crosshair.location = pick(data.crosshair?.location, ['x', 'y', 'z']);
+  return {
+    ...pick(data, ['ok']),
+    player,
+    crosshair,
+    world: pick(data.world, ['dimension', 'game_time', 'day_time', 'raining', 'thundering', 'rain_level', 'thunder_level']),
+    nearby,
+  };
+}
+
+async function jsonTool(path, sanitize = (value) => value) {
   const bytes = await request(path, MAX_JSON_BYTES);
-  const data = JSON.parse(bytes.toString('utf8'));
+  const data = sanitize(JSON.parse(bytes.toString('utf8')));
   return { content: [{ type: 'text', text: JSON.stringify(data) }], isError: false };
 }
 
@@ -85,7 +133,7 @@ function emptyArgs(args) {
 async function callTool(name, args) {
   if (name === 'minecraft_status') {
     emptyArgs(args);
-    return jsonTool('/control/status');
+    return jsonTool('/control/status', publicStatus);
   }
   if (name === 'minecraft_state') {
     if (args === undefined) args = {};
@@ -96,7 +144,7 @@ async function callTool(name, args) {
     if (typeof radius !== 'number' || !Number.isFinite(radius) || radius < 0 || radius > 16) {
       throw new Error('radius must be between 0 and 16');
     }
-    return jsonTool(`/control/state?radius=${radius}`);
+    return jsonTool(`/control/state?radius=${radius}`, publicState);
   }
   if (name === 'minecraft_screen') {
     emptyArgs(args);
